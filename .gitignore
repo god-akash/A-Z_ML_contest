@@ -21,3 +21,30 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+.venv
+.gitignore
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Large datasets
+dataset/
+*.tsv
+*.csv
+*.parquet
+
+# Generated outputs
+output/
+
+# ML models
+*.model
+*.json
+*.pkl
+*.joblib
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
