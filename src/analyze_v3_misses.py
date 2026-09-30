@@ -1,8 +1,8 @@
 import os
-import re
 import pickle
+import re
 import unicodedata
-from collections import Counter, defaultdict
+from collections import Counter
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -73,11 +73,12 @@ OUTPUT_PATH = os.path.join(
 # CONFIG
 # ============================================================
 
-# Number of missed pairs to save for detailed inspection.
+# We do NOT load all 462M candidates into RAM.
+#
+# We only keep the TRUE ground-truth pairs in RAM.
+#
+# Maximum detailed examples saved.
 SAMPLE_SIZE = 20_000
-
-# Number of examples printed to terminal.
-PRINT_EXAMPLES = 50
 
 
 # ============================================================
@@ -156,16 +157,6 @@ def normalize_ascii(text):
     return text.strip()
 
 
-def tokens(text):
-
-    if not text:
-        return []
-
-    return TOKEN_RE.findall(
-        text
-    )
-
-
 def numbers(text):
 
     if not text:
@@ -176,175 +167,120 @@ def numbers(text):
     )
 
 
-# ============================================================
-# SIMILARITY FEATURES FOR DIAGNOSTICS
-# ============================================================
-
-def name_similarity(
-    a,
-    b
-):
-
-    if not a or not b:
-        return 0.0
-
-    return ratio(
-        a,
-        b
-    )
-
-
-def name_token_similarity(
-    a,
-    b
-):
-
-    if not a or not b:
-        return 0.0
-
-    return token_set_ratio(
-        a,
-        b
-    )
-
-
-def address_similarity(
-    a,
-    b
-):
-
-    if not a or not b:
-        return 0.0
-
-    return ratio(
-        a,
-        b
-    )
-
-
-def address_token_similarity(
-    a,
-    b
-):
-
-    if not a or not b:
-        return 0.0
-
-    return token_set_ratio(
-        a,
-        b
-    )
-
-
-def number_overlap(
-    a,
-    b
-):
-
-    na = set(
-        numbers(a)
-    )
-
-    nb = set(
-        numbers(b)
-    )
-
-    if not na or not nb:
-        return 0.0
-
-    return (
-        len(na & nb)
-        /
-        max(
-            len(na | nb),
-            1
-        )
-    )
-
-
-def has_non_latin(
-    text
-):
+def has_non_latin(text):
 
     if not text:
         return False
 
     for ch in str(text):
 
-        if ch.isalpha():
-
-            if ord(ch) > 127:
-                return True
+        if ch.isalpha() and ord(ch) > 127:
+            return True
 
     return False
 
 
 # ============================================================
-# CLASSIFY MISSED PAIR
+# SIMILARITY
 # ============================================================
 
-def classify_pair(
+def calculate_similarity(
     name1,
     name2,
     addr1,
     addr2
 ):
 
-    nu1 = normalize_unicode(
+    n1 = normalize_unicode(
         name1
     )
 
-    nu2 = normalize_unicode(
+    n2 = normalize_unicode(
         name2
     )
 
-    na1 = normalize_ascii(
-        name1
-    )
-
-    na2 = normalize_ascii(
-        name2
-    )
-
-    au1 = normalize_unicode(
+    a1 = normalize_unicode(
         addr1
     )
 
-    au2 = normalize_unicode(
+    a2 = normalize_unicode(
         addr2
     )
 
-    name_r = name_similarity(
-        nu1,
-        nu2
+    ascii_n1 = normalize_ascii(
+        name1
     )
 
-    name_token_r = name_token_similarity(
-        nu1,
-        nu2
+    ascii_n2 = normalize_ascii(
+        name2
     )
 
-    ascii_name_r = name_similarity(
-        na1,
-        na2
+    if n1 and n2:
+
+        name_ratio = ratio(
+            n1,
+            n2
+        )
+
+        name_token_ratio = token_set_ratio(
+            n1,
+            n2
+        )
+
+    else:
+
+        name_ratio = 0.0
+        name_token_ratio = 0.0
+
+    if a1 and a2:
+
+        address_ratio = ratio(
+            a1,
+            a2
+        )
+
+        address_token_ratio = token_set_ratio(
+            a1,
+            a2
+        )
+
+    else:
+
+        address_ratio = 0.0
+        address_token_ratio = 0.0
+
+    if ascii_n1 and ascii_n2:
+
+        ascii_name_ratio = ratio(
+            ascii_n1,
+            ascii_n2
+        )
+
+    else:
+
+        ascii_name_ratio = 0.0
+
+    nums1 = set(
+        numbers(a1)
     )
 
-    addr_r = address_similarity(
-        au1,
-        au2
+    nums2 = set(
+        numbers(a2)
     )
 
-    addr_token_r = address_token_similarity(
-        au1,
-        au2
-    )
+    if nums1 and nums2:
 
-    num_r = number_overlap(
-        au1,
-        au2
-    )
+        number_overlap = (
+            len(nums1 & nums2)
+            /
+            len(nums1 | nums2)
+        )
 
-    nonlatin = (
+    else:
+
+        number_overlap = 0.0
+
+    cross_script = (
         has_non_latin(name1)
         or
         has_non_latin(name2)
@@ -352,98 +288,78 @@ def classify_pair(
 
     # --------------------------------------------------------
     # Classification
-    #
-    # These are diagnostic buckets, not model labels.
     # --------------------------------------------------------
 
-    if nonlatin:
+    if cross_script:
 
-        category = (
-            "cross_script"
-        )
+        category = "cross_script"
 
     elif (
-        name_r >= 90
-        and addr_r >= 90
+        name_ratio >= 90
+        and address_ratio >= 90
     ):
 
-        category = (
-            "both_very_close"
-        )
+        category = "both_very_close"
 
     elif (
-        name_r >= 90
-        and addr_r < 70
+        name_ratio >= 90
+        and address_ratio < 70
     ):
 
-        category = (
-            "name_strong_address_weak"
-        )
+        category = "name_strong_address_weak"
 
     elif (
-        name_r < 70
-        and addr_r >= 90
+        name_ratio < 70
+        and address_ratio >= 90
     ):
 
-        category = (
-            "address_strong_name_weak"
-        )
+        category = "address_strong_name_weak"
 
     elif (
-        name_r >= 80
-        and addr_r >= 80
+        name_ratio >= 80
+        and address_ratio >= 80
     ):
 
-        category = (
-            "both_close"
-        )
+        category = "both_close"
 
-    elif name_r >= 80:
+    elif name_ratio >= 80:
 
-        category = (
-            "name_close"
-        )
+        category = "name_close"
 
-    elif addr_r >= 80:
+    elif address_ratio >= 80:
 
-        category = (
-            "address_close"
-        )
+        category = "address_close"
 
     elif (
-        ascii_name_r >= 80
-        and name_r < 70
+        ascii_name_ratio >= 80
+        and name_ratio < 70
     ):
 
-        category = (
-            "transliteration_like"
-        )
+        category = "transliteration_like"
 
     else:
 
-        category = (
-            "both_far"
-        )
+        category = "both_far"
 
     return {
-        "name_ratio": name_r,
-        "name_token_ratio": name_token_r,
-        "ascii_name_ratio": ascii_name_r,
-        "address_ratio": addr_r,
-        "address_token_ratio": addr_token_r,
-        "number_overlap": num_r,
-        "cross_script": int(nonlatin),
+        "name_ratio": name_ratio,
+        "name_token_ratio": name_token_ratio,
+        "ascii_name_ratio": ascii_name_ratio,
+        "address_ratio": address_ratio,
+        "address_token_ratio": address_token_ratio,
+        "number_overlap": number_overlap,
+        "cross_script": int(cross_script),
         "category": category,
     }
 
 
 # ============================================================
-# LOAD DATA
+# LOAD SOURCES
 # ============================================================
 
 def load_sources():
 
-    print("\nLoading Source 1...")
+    print("\nLoading S1...")
 
     s1 = pd.read_csv(
         S1_PATH,
@@ -462,7 +378,7 @@ def load_sources():
         f"S1: {len(s1):,}"
     )
 
-    print("\nLoading Source 2...")
+    print("\nLoading S2...")
 
     s2 = pd.read_csv(
         S2_PATH,
@@ -481,7 +397,7 @@ def load_sources():
         f"S2: {len(s2):,}"
     )
 
-    print("\nLoading Source 3...")
+    print("\nLoading S3...")
 
     s3 = pd.read_csv(
         S3_PATH,
@@ -504,137 +420,14 @@ def load_sources():
 
 
 # ============================================================
-# BUILD TARGET LOOKUP
-# ============================================================
-
-def build_target_lookup(
-    s2,
-    s3
-):
-
-    print(
-        "\nBuilding S2/S3 entity lookup..."
-    )
-
-    lookup = {}
-
-    for row in s2.itertuples(
-        index=False
-    ):
-
-        lookup[
-            row.entity_id
-        ] = (
-            row.business_name,
-            row.business_address,
-            row.country,
-            "source2"
-        )
-
-    for row in s3.itertuples(
-        index=False
-    ):
-
-        lookup[
-            row.entity_id
-        ] = (
-            row.business_name,
-            row.business_address,
-            row.country,
-            "source3"
-        )
-
-    print(
-        f"Target records: "
-        f"{len(lookup):,}"
-    )
-
-    return lookup
-
-
-# ============================================================
-# LOAD CANDIDATE PAIRS INTO SET
-#
-# We need membership checks for the GT pairs.
-# ============================================================
-
-def load_candidate_pairs():
-
-    print(
-        "\nLoading candidate pairs..."
-    )
-
-    pf = pq.ParquetFile(
-        CANDIDATE_PATH
-    )
-
-    candidate_set = set()
-
-    total = 0
-
-    batch_no = 0
-
-    for batch in pf.iter_batches(
-        batch_size=5_000_000
-    ):
-
-        batch_no += 1
-
-        s1_arr = batch[
-            "s1_idx"
-        ].to_numpy()
-
-        cand_arr = batch[
-            "cand_code"
-        ].to_numpy()
-
-        for s1_idx, cand_code in zip(
-            s1_arr,
-            cand_arr
-        ):
-
-            candidate_set.add(
-                (
-                    int(s1_idx),
-                    int(cand_code)
-                )
-            )
-
-        total += len(
-            s1_arr
-        )
-
-        print(
-            f"  batch={batch_no:,} "
-            f"rows={total:,}",
-            flush=True
-        )
-
-    print(
-        f"\nUnique candidate pairs: "
-        f"{len(candidate_set):,}"
-    )
-
-    return candidate_set
-
-
-# ============================================================
-# MAIN DIAGNOSTIC
+# MAIN
 # ============================================================
 
 def main():
 
-    print(
-        "=" * 70
-    )
-
-    print(
-        "V3 MISSED-PAIR DIAGNOSTIC"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("MEMORY-SAFE V3 MISSED-PAIR DIAGNOSTIC")
+    print("=" * 70)
 
     # --------------------------------------------------------
     # Check files
@@ -649,15 +442,11 @@ def main():
         ID_MAP_PATH,
     ]
 
-    print(
-        "\nChecking files..."
-    )
+    print("\nChecking files...")
 
     for path in required:
 
-        if not os.path.exists(
-            path
-        ):
+        if not os.path.exists(path):
 
             raise FileNotFoundError(
                 f"\nMissing file:\n{path}"
@@ -668,11 +457,11 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Load ID maps
+    # Load cached ID maps
     # --------------------------------------------------------
 
     print(
-        "\nLoading V3 ID maps..."
+        "\nLoading cached V3 ID maps..."
     )
 
     with open(
@@ -680,9 +469,7 @@ def main():
         "rb"
     ) as f:
 
-        maps = pickle.load(
-            f
-        )
+        maps = pickle.load(f)
 
     s1_ids = maps[
         "s1_ids"
@@ -707,34 +494,20 @@ def main():
     }
 
     print(
-        f"S1 IDs: {len(s1_ids):,}"
+        f"S1 records: "
+        f"{len(s1_ids):,}"
     )
 
     print(
-        f"Indexed target IDs: "
+        f"Indexed target records: "
         f"{len(rid_ids):,}"
     )
 
     # --------------------------------------------------------
-    # Load sources
+    # Load S1/S2/S3
     # --------------------------------------------------------
 
     s1, s2, s3 = load_sources()
-
-    # --------------------------------------------------------
-    # Build target lookup
-    # --------------------------------------------------------
-
-    target_lookup = build_target_lookup(
-        s2,
-        s3
-    )
-
-    # --------------------------------------------------------
-    # Load candidate set
-    # --------------------------------------------------------
-
-    candidate_set = load_candidate_pairs()
 
     # --------------------------------------------------------
     # Build S1 lookup
@@ -759,12 +532,60 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Load ground truth
+    # Build target lookup
     # --------------------------------------------------------
 
     print(
-        "\nLoading ground truth..."
+        "\nBuilding target lookup..."
     )
+
+    target_lookup = {}
+
+    for row in s2.itertuples(
+        index=False
+    ):
+
+        target_lookup[
+            row.entity_id
+        ] = (
+            row.business_name,
+            row.business_address,
+            row.country,
+            "source2"
+        )
+
+    for row in s3.itertuples(
+        index=False
+    ):
+
+        target_lookup[
+            row.entity_id
+        ] = (
+            row.business_name,
+            row.business_address,
+            row.country,
+            "source3"
+        )
+
+    print(
+        f"Target lookup: "
+        f"{len(target_lookup):,}"
+    )
+
+    # ========================================================
+    # STEP 1
+    #
+    # Build ONLY the TRUE PAIR set.
+    #
+    # 7.6M pairs is manageable.
+    #
+    # DO NOT load candidate pairs into RAM.
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("STEP 1: BUILD TRUE PAIR SET")
+    print("=" * 70)
 
     gt = pd.read_csv(
         GT_PATH,
@@ -773,50 +594,18 @@ def main():
         keep_default_na=False
     )
 
-    # --------------------------------------------------------
-    # Diagnostic counters
-    # --------------------------------------------------------
+    true_pairs = set()
 
     total_truth = 0
 
-    missed_total = 0
-
-    missed_not_indexed = 0
-
-    missed_indexed = 0
-
-    category_counter = Counter()
-
-    # Similarity buckets
-    name_buckets = Counter()
-    address_buckets = Counter()
-
-    cross_script_count = 0
-
-    # --------------------------------------------------------
-    # Save detailed samples
-    # --------------------------------------------------------
-
-    sample_rows = []
-
-    # --------------------------------------------------------
-    # Process GT
-    # --------------------------------------------------------
-
-    print(
-        "\nAnalyzing missed pairs..."
-    )
+    not_indexed = set()
 
     for row_no, row in enumerate(
-        gt.itertuples(
-            index=False
-        )
+        gt.itertuples(index=False)
     ):
 
-        s1_id = row.source1_entity_id
-
         s1_idx = s1_to_idx.get(
-            s1_id
+            row.source1_entity_id
         )
 
         if s1_idx is None:
@@ -835,268 +624,434 @@ def main():
             if x.strip()
         ]
 
+        total_truth += len(
+            targets
+        )
+
         for target_id in targets:
 
-            total_truth += 1
-
-            target_code = (
-                rid_to_code.get(
-                    target_id
-                )
+            code = rid_to_code.get(
+                target_id
             )
 
-            # ------------------------------------------------
-            # If target is not in index, blocking definitely
-            # missed it.
-            # ------------------------------------------------
+            if code is None:
 
-            if target_code is None:
-
-                missed_total += 1
-
-                missed_not_indexed += 1
-
-                if (
-                    len(sample_rows)
-                    <
-                    SAMPLE_SIZE
-                ):
-
-                    s1_data = (
-                        s1_lookup.get(
-                            s1_id,
-                            ("", "", "")
-                        )
+                # This target never entered the V3 index.
+                not_indexed.add(
+                    (
+                        s1_idx,
+                        target_id
                     )
-
-                    target_data = (
-                        target_lookup.get(
-                            target_id,
-                            ("", "", "")
-                        )
-                    )
-
-                    name1, addr1, country1 = (
-                        s1_data
-                    )
-
-                    name2, addr2, country2, source = (
-                        target_data
-                    )
-
-                    sim = classify_pair(
-                        name1,
-                        name2,
-                        addr1,
-                        addr2
-                    )
-
-                    sample_rows.append(
-                        {
-                            "s1_entity_id": s1_id,
-                            "target_entity_id": target_id,
-                            "target_source": source,
-                            "country_s1": country1,
-                            "country_target": country2,
-                            "name_s1": name1,
-                            "name_target": name2,
-                            "address_s1": addr1,
-                            "address_target": addr2,
-                            "indexed": 0,
-                            "candidate": 0,
-                            **sim,
-                        }
-                    )
+                )
 
                 continue
 
-            # ------------------------------------------------
-            # Check whether actual pair exists in candidate set
-            # ------------------------------------------------
-
-            pair = (
-                int(s1_idx),
-                int(target_code)
-            )
-
-            if pair in candidate_set:
-
-                # Correctly blocked.
-                continue
-
-            # ------------------------------------------------
-            # Missed even though target was indexed.
-            # ------------------------------------------------
-
-            missed_total += 1
-
-            missed_indexed += 1
-
-            # ------------------------------------------------
-            # Get actual records
-            # ------------------------------------------------
-
-            s1_data = (
-                s1_lookup.get(
-                    s1_id,
-                    ("", "", "")
+            packed = (
+                s1_idx
+                *
+                (
+                    len(rid_ids) + 1
                 )
+                +
+                code
             )
 
-            target_data = (
-                target_lookup.get(
-                    target_id,
-                    ("", "", "")
-                )
+            true_pairs.add(
+                packed
             )
-
-            name1, addr1, country1 = (
-                s1_data
-            )
-
-            name2, addr2, country2, source = (
-                target_data
-            )
-
-            # ------------------------------------------------
-            # Similarity analysis
-            # ------------------------------------------------
-
-            sim = classify_pair(
-                name1,
-                name2,
-                addr1,
-                addr2
-            )
-
-            category = sim[
-                "category"
-            ]
-
-            category_counter[
-                category
-            ] += 1
-
-            # ------------------------------------------------
-            # Name buckets
-            # ------------------------------------------------
-
-            nr = sim[
-                "name_ratio"
-            ]
-
-            if nr >= 95:
-                name_buckets[
-                    "95-100"
-                ] += 1
-
-            elif nr >= 90:
-                name_buckets[
-                    "90-95"
-                ] += 1
-
-            elif nr >= 80:
-                name_buckets[
-                    "80-90"
-                ] += 1
-
-            elif nr >= 70:
-                name_buckets[
-                    "70-80"
-                ] += 1
-
-            elif nr >= 50:
-                name_buckets[
-                    "50-70"
-                ] += 1
-
-            else:
-                name_buckets[
-                    "<50"
-                ] += 1
-
-            # ------------------------------------------------
-            # Address buckets
-            # ------------------------------------------------
-
-            ar = sim[
-                "address_ratio"
-            ]
-
-            if ar >= 95:
-                address_buckets[
-                    "95-100"
-                ] += 1
-
-            elif ar >= 90:
-                address_buckets[
-                    "90-95"
-                ] += 1
-
-            elif ar >= 80:
-                address_buckets[
-                    "80-90"
-                ] += 1
-
-            elif ar >= 70:
-                address_buckets[
-                    "70-80"
-                ] += 1
-
-            elif ar >= 50:
-                address_buckets[
-                    "50-70"
-                ] += 1
-
-            else:
-                address_buckets[
-                    "<50"
-                ] += 1
-
-            if sim[
-                "cross_script"
-            ]:
-
-                cross_script_count += 1
-
-            # ------------------------------------------------
-            # Save sample
-            # ------------------------------------------------
-
-            if (
-                len(sample_rows)
-                <
-                SAMPLE_SIZE
-            ):
-
-                sample_rows.append(
-                    {
-                        "s1_entity_id": s1_id,
-                        "target_entity_id": target_id,
-                        "target_source": source,
-                        "country_s1": country1,
-                        "country_target": country2,
-                        "name_s1": name1,
-                        "name_target": name2,
-                        "address_s1": addr1,
-                        "address_target": addr2,
-                        "indexed": 1,
-                        "candidate": 0,
-                        **sim,
-                    }
-                )
 
         if (
             row_no + 1
-        ) % 100_000 == 0:
+        ) % 500_000 == 0:
 
             print(
-                f"  GT rows "
+                f"  GT rows: "
                 f"{row_no + 1:,}/"
                 f"{len(gt):,} "
-                f"truth={total_truth:,} "
-                f"missed={missed_total:,}",
+                f"truth={total_truth:,}",
                 flush=True
+            )
+
+    print()
+    print(
+        f"FULL TRUE PAIRS: "
+        f"{total_truth:,}"
+    )
+
+    print(
+        f"TRUE PAIRS IN INDEX: "
+        f"{len(true_pairs):,}"
+    )
+
+    print(
+        f"TRUE TARGETS NOT INDEXED: "
+        f"{len(not_indexed):,}"
+    )
+
+    # ========================================================
+    # STEP 2
+    #
+    # Stream 462M candidates.
+    #
+    # We DO NOT store them.
+    #
+    # We simply remove recovered true pairs from true_pairs.
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("STEP 2: STREAM CANDIDATES")
+    print("=" * 70)
+
+    print(
+        "IMPORTANT: "
+        "Candidate rows are NOT stored in RAM."
+    )
+
+    pf = pq.ParquetFile(
+        CANDIDATE_PATH
+    )
+
+    processed = 0
+
+    recovered = 0
+
+    batch_no = 0
+
+    for batch in pf.iter_batches(
+        batch_size=2_000_000
+    ):
+
+        batch_no += 1
+
+        s1_arr = batch[
+            "s1_idx"
+        ].to_numpy()
+
+        cand_arr = batch[
+            "cand_code"
+        ].to_numpy()
+
+        for s1_idx, cand_code in zip(
+            s1_arr,
+            cand_arr
+        ):
+
+            packed = (
+                int(s1_idx)
+                *
+                (
+                    len(rid_ids) + 1
+                )
+                +
+                int(cand_code)
+            )
+
+            if packed in true_pairs:
+
+                true_pairs.remove(
+                    packed
+                )
+
+                recovered += 1
+
+        processed += len(
+            s1_arr
+        )
+
+        if batch_no % 10 == 0:
+
+            print(
+                f"  processed="
+                f"{processed:,} "
+                f"recovered="
+                f"{recovered:,} "
+                f"remaining_true="
+                f"{len(true_pairs):,}",
+                flush=True
+            )
+
+    # ========================================================
+    # STEP 3
+    #
+    # true_pairs now contains ONLY indexed true pairs
+    # that V3 failed to generate.
+    # ========================================================
+
+    indexed_misses = true_pairs
+
+    print()
+    print("=" * 70)
+    print("STEP 3: MISS SUMMARY")
+    print("=" * 70)
+
+    print(
+        f"FULL TRUE PAIRS     : "
+        f"{total_truth:,}"
+    )
+
+    print(
+        f"RECOVERED           : "
+        f"{recovered:,}"
+    )
+
+    print(
+        f"NOT INDEXED         : "
+        f"{len(not_indexed):,}"
+    )
+
+    print(
+        f"INDEXED BUT MISSED  : "
+        f"{len(indexed_misses):,}"
+    )
+
+    print(
+        f"TOTAL MISSED        : "
+        f"{len(not_indexed) + len(indexed_misses):,}"
+    )
+
+    # ========================================================
+    # STEP 4
+    #
+    # Analyze indexed misses.
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("STEP 4: ANALYZE INDEXED MISSES")
+    print("=" * 70)
+
+    category_counter = Counter()
+
+    name_buckets = Counter()
+
+    address_buckets = Counter()
+
+    cross_script_count = 0
+
+    sample_rows = []
+
+    # --------------------------------------------------------
+    # Convert packed indexed misses back to IDs
+    # --------------------------------------------------------
+
+    divisor = (
+        len(rid_ids) + 1
+    )
+
+    # We only analyze up to SAMPLE_SIZE detailed rows.
+    #
+    # Statistics are still calculated for all indexed misses.
+    # --------------------------------------------------------
+
+    for miss_no, packed in enumerate(
+        indexed_misses
+    ):
+
+        s1_idx = (
+            packed // divisor
+        )
+
+        target_code = (
+            packed % divisor
+        )
+
+        if (
+            s1_idx >= len(s1_ids)
+            or
+            target_code >= len(rid_ids)
+        ):
+
+            continue
+
+        s1_id = s1_ids[
+            s1_idx
+        ]
+
+        target_id = rid_ids[
+            target_code
+        ]
+
+        s1_data = s1_lookup.get(
+            s1_id,
+            ("", "", "")
+        )
+
+        target_data = target_lookup.get(
+            target_id,
+            ("", "", "", "")
+        )
+
+        name1, addr1, country1 = (
+            s1_data
+        )
+
+        name2, addr2, country2, source = (
+            target_data
+        )
+
+        sim = calculate_similarity(
+            name1,
+            name2,
+            addr1,
+            addr2
+        )
+
+        category = sim[
+            "category"
+        ]
+
+        category_counter[
+            category
+        ] += 1
+
+        # ----------------------------------------------------
+        # Name bucket
+        # ----------------------------------------------------
+
+        nr = sim[
+            "name_ratio"
+        ]
+
+        if nr >= 95:
+            name_buckets["95-100"] += 1
+
+        elif nr >= 90:
+            name_buckets["90-95"] += 1
+
+        elif nr >= 80:
+            name_buckets["80-90"] += 1
+
+        elif nr >= 70:
+            name_buckets["70-80"] += 1
+
+        elif nr >= 50:
+            name_buckets["50-70"] += 1
+
+        else:
+            name_buckets["<50"] += 1
+
+        # ----------------------------------------------------
+        # Address bucket
+        # ----------------------------------------------------
+
+        ar = sim[
+            "address_ratio"
+        ]
+
+        if ar >= 95:
+            address_buckets["95-100"] += 1
+
+        elif ar >= 90:
+            address_buckets["90-95"] += 1
+
+        elif ar >= 80:
+            address_buckets["80-90"] += 1
+
+        elif ar >= 70:
+            address_buckets["70-80"] += 1
+
+        elif ar >= 50:
+            address_buckets["50-70"] += 1
+
+        else:
+            address_buckets["<50"] += 1
+
+        if sim[
+            "cross_script"
+        ]:
+
+            cross_script_count += 1
+
+        # ----------------------------------------------------
+        # Save sample
+        # ----------------------------------------------------
+
+        if len(sample_rows) < SAMPLE_SIZE:
+
+            sample_rows.append(
+                {
+                    "s1_entity_id": s1_id,
+                    "target_entity_id": target_id,
+                    "target_source": source,
+                    "country_s1": country1,
+                    "country_target": country2,
+                    "name_s1": name1,
+                    "name_target": name2,
+                    "address_s1": addr1,
+                    "address_target": addr2,
+                    "indexed": 1,
+                    "candidate": 0,
+                    **sim
+                }
+            )
+
+    # ========================================================
+    # NOT INDEXED SAMPLE
+    # ========================================================
+
+    print(
+        "\nAnalyzing not-indexed examples..."
+    )
+
+    for s1_idx, target_id in list(
+        not_indexed
+    )[
+        :SAMPLE_SIZE
+    ]:
+
+        if (
+            s1_idx >= len(s1_ids)
+        ):
+
+            continue
+
+        s1_id = s1_ids[
+            s1_idx
+        ]
+
+        s1_data = s1_lookup.get(
+            s1_id,
+            ("", "", "")
+        )
+
+        target_data = target_lookup.get(
+            target_id,
+            ("", "", "", "")
+        )
+
+        name1, addr1, country1 = (
+            s1_data
+        )
+
+        name2, addr2, country2, source = (
+            target_data
+        )
+
+        sim = calculate_similarity(
+            name1,
+            name2,
+            addr1,
+            addr2
+        )
+
+        if len(sample_rows) < SAMPLE_SIZE:
+
+            sample_rows.append(
+                {
+                    "s1_entity_id": s1_id,
+                    "target_entity_id": target_id,
+                    "target_source": source,
+                    "country_s1": country1,
+                    "country_target": country2,
+                    "name_s1": name1,
+                    "name_target": name2,
+                    "address_s1": addr1,
+                    "address_target": addr2,
+                    "indexed": 0,
+                    "candidate": 0,
+                    **sim
+                }
             )
 
     # ========================================================
@@ -1104,82 +1059,53 @@ def main():
     # ========================================================
 
     print()
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("FINAL MISS DIAGNOSTIC")
+    print("=" * 70)
 
     print(
-        "V3 MISSED-PAIR DIAGNOSTIC RESULTS"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"TOTAL TRUE PAIRS       : "
+        f"TRUE PAIRS          : "
         f"{total_truth:,}"
     )
 
     print(
-        f"TOTAL MISSED           : "
-        f"{missed_total:,}"
+        f"RECOVERED           : "
+        f"{recovered:,}"
     )
 
     print(
-        f"MISSED - NOT INDEXED  : "
-        f"{missed_not_indexed:,}"
+        f"INDEXED MISSES      : "
+        f"{len(indexed_misses):,}"
     )
 
     print(
-        f"MISSED - INDEXED       : "
-        f"{missed_indexed:,}"
+        f"NOT INDEXED         : "
+        f"{len(not_indexed):,}"
     )
 
-    if total_truth:
-
-        print(
-            f"MISS RATE               : "
-            f"{missed_total / total_truth:.4%}"
-        )
-
-        print(
-            f"NOT INDEXED RATE       : "
-            f"{missed_not_indexed / total_truth:.4%}"
-        )
-
-        print(
-            f"INDEXED MISS RATE      : "
-            f"{missed_indexed / total_truth:.4%}"
-        )
+    print(
+        f"TOTAL MISSES        : "
+        f"{len(indexed_misses) + len(not_indexed):,}"
+    )
 
     # ========================================================
-    # CATEGORY DISTRIBUTION
+    # CATEGORIES
     # ========================================================
 
     print()
-    print(
-        "-" * 70
-    )
-
-    print(
-        "MISSED PAIR CATEGORIES"
-    )
-
-    print(
-        "-" * 70
-    )
+    print("-" * 70)
+    print("INDEXED MISS CATEGORIES")
+    print("-" * 70)
 
     for category, count in (
-        category_counter
-        .most_common()
+        category_counter.most_common()
     ):
 
         pct = (
             count
             /
             max(
-                missed_indexed,
+                len(indexed_misses),
                 1
             )
             *
@@ -1187,7 +1113,7 @@ def main():
         )
 
         print(
-            f"{category:<32}"
+            f"{category:<35}"
             f"{count:>10,}"
             f"  {pct:>7.2f}%"
         )
@@ -1197,28 +1123,20 @@ def main():
     # ========================================================
 
     print()
-    print(
-        "-" * 70
-    )
-
-    print(
-        "CROSS-SCRIPT"
-    )
-
-    print(
-        "-" * 70
-    )
+    print("-" * 70)
+    print("CROSS-SCRIPT")
+    print("-" * 70)
 
     print(
         f"Cross-script indexed misses: "
         f"{cross_script_count:,}"
     )
 
-    if missed_indexed:
+    if indexed_misses:
 
         print(
             f"Percentage: "
-            f"{cross_script_count / missed_indexed:.2%}"
+            f"{cross_script_count / len(indexed_misses):.2%}"
         )
 
     # ========================================================
@@ -1226,28 +1144,18 @@ def main():
     # ========================================================
 
     print()
-    print(
-        "-" * 70
-    )
+    print("-" * 70)
+    print("NAME SIMILARITY")
+    print("-" * 70)
 
-    print(
-        "NAME SIMILARITY DISTRIBUTION"
-    )
-
-    print(
-        "-" * 70
-    )
-
-    name_order = [
+    for bucket in [
         "95-100",
         "90-95",
         "80-90",
         "70-80",
         "50-70",
         "<50",
-    ]
-
-    for bucket in name_order:
+    ]:
 
         count = name_buckets[
             bucket
@@ -1257,7 +1165,7 @@ def main():
             count
             /
             max(
-                missed_indexed,
+                len(indexed_misses),
                 1
             )
             *
@@ -1275,28 +1183,18 @@ def main():
     # ========================================================
 
     print()
-    print(
-        "-" * 70
-    )
+    print("-" * 70)
+    print("ADDRESS SIMILARITY")
+    print("-" * 70)
 
-    print(
-        "ADDRESS SIMILARITY DISTRIBUTION"
-    )
-
-    print(
-        "-" * 70
-    )
-
-    address_order = [
+    for bucket in [
         "95-100",
         "90-95",
         "80-90",
         "70-80",
         "50-70",
         "<50",
-    ]
-
-    for bucket in address_order:
+    ]:
 
         count = address_buckets[
             bucket
@@ -1306,7 +1204,7 @@ def main():
             count
             /
             max(
-                missed_indexed,
+                len(indexed_misses),
                 1
             )
             *
@@ -1337,7 +1235,7 @@ def main():
 
         print()
         print(
-            f"Saved detailed sample:"
+            f"Saved sample:"
         )
 
         print(
@@ -1345,7 +1243,7 @@ def main():
         )
 
         print(
-            f"Sample rows: "
+            f"Rows saved: "
             f"{len(sample_df):,}"
         )
 
@@ -1354,22 +1252,12 @@ def main():
     # ========================================================
 
     print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"FIRST {PRINT_EXAMPLES} MISSED EXAMPLES"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("FIRST MISSED EXAMPLES")
+    print("=" * 70)
 
     for i, row in enumerate(
-        sample_rows[
-            :PRINT_EXAMPLES
-        ],
+        sample_rows[:30],
         start=1
     ):
 
@@ -1380,49 +1268,41 @@ def main():
         )
 
         print(
-            f"S1:     "
+            f"S1 NAME : "
             f"{row['name_s1']}"
         )
 
         print(
-            f"TARGET: "
+            f"T NAME  : "
             f"{row['name_target']}"
         )
 
         print(
-            f"S1 ADDR: "
+            f"S1 ADDR : "
             f"{row['address_s1']}"
         )
 
         print(
-            f"T ADDR:  "
+            f"T ADDR  : "
             f"{row['address_target']}"
         )
 
         print(
             f"name={row['name_ratio']:.1f} "
             f"addr={row['address_ratio']:.1f} "
-            f"token_name={row['name_token_ratio']:.1f} "
-            f"token_addr={row['address_token_ratio']:.1f}"
+            f"name_token={row['name_token_ratio']:.1f} "
+            f"addr_token={row['address_token_ratio']:.1f}"
         )
 
         print(
-            f"source={row['target_source']} "
-            f"country={row['country_s1']}"
+            f"indexed={row['indexed']} "
+            f"source={row['target_source']}"
         )
 
     print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "DIAGNOSTIC COMPLETE"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
+    print("DONE")
+    print("=" * 70)
 
 
 # ============================================================
